@@ -4,14 +4,49 @@ from app.models import init_db, check_db, insert_message, fetch_messages
 from app.security import verify_signature
 from app.schemas import WebhookMessage
 import json
+from datetime import datetime
 from app.models import get_stats
+import time
+import uuid
+from app.logging_utils import setup_logging, log_event
+
 
 app = FastAPI(title="Lyftr Backend Assignment")
 
 
 @app.on_event("startup")
 def startup_event():
+    setup_logging(settings.LOG_LEVEL)
     init_db()
+
+@app.post("/webhook")
+async def webhook(request: Request):
+    raw_body = await request.body()
+
+    signature = request.headers.get("X-Signature")
+    if not signature or not verify_signature(raw_body, signature):
+        raise HTTPException(status_code=401, detail="invalid signature")
+
+    payload = json.loads(raw_body)
+    message = WebhookMessage(**payload)
+
+    result = insert_message(message)
+
+    # 🔹 Webhook-specific structured log
+    log_event({
+        "ts": datetime.utcnow().isoformat() + "Z",
+        "level": "INFO",
+        "request_id": "webhook",
+        "method": "POST",
+        "path": "/webhook",
+        "status": 200,
+        "latency_ms": 0,
+        "message_id": message.message_id,
+        "dup": result == "duplicate",
+        "result": result,
+    })
+
+    return {"status": "ok"}
 
 
 @app.get("/messages")
@@ -41,3 +76,26 @@ def list_messages(
 @app.get("/stats")
 def stats():
     return get_stats()
+@app.middleware("http")
+async def logging_middleware(request: Request, call_next):
+    start_time = time.time()
+    request_id = str(uuid.uuid4())
+
+    response = await call_next(request)
+
+    latency_ms = int((time.time() - start_time) * 1000)
+
+    log_data = {
+        "ts": datetime.utcnow().isoformat() + "Z",
+        "level": "INFO",
+        "request_id": request_id,
+        "method": request.method,
+        "path": request.url.path,
+        "status": response.status_code,
+        "latency_ms": latency_ms,
+    }
+
+    log_event(log_data)
+
+    return response
+

@@ -1,0 +1,11 @@
+services:
+  api:
+    build: .
+    container_name: lyftr-api
+    ports:
+      - "8000:8000"
+    environment:
+      WEBHOOK_SECRET: testsecret
+      LOG_LEVEL: INFO
+    volumes:
+      - ./app.db:/app/app.db
