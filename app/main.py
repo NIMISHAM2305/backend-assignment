@@ -9,7 +9,7 @@ from app.models import get_stats
 import time
 import uuid
 from app.logging_utils import setup_logging, log_event
-
+from fastapi import HTTPException
 
 app = FastAPI(title="Lyftr Backend Assignment")
 
@@ -21,33 +21,49 @@ def startup_event():
 
 @app.post("/webhook")
 async def webhook(request: Request):
-    raw_body = await request.body()
+    start_time = time.time()
+    request_id = str(uuid.uuid4())
 
+    raw_body = await request.body()
     signature = request.headers.get("X-Signature")
+
+    # ❌ Invalid or missing signature
     if not signature or not verify_signature(raw_body, signature):
+        latency_ms = int((time.time() - start_time) * 1000)
+
+        log_event({
+            "ts": datetime.utcnow().isoformat() + "Z",
+            "level": "ERROR",
+            "request_id": request_id,
+            "method": "POST",
+            "path": "/webhook",
+            "status": 401,
+            "latency_ms": latency_ms,
+            "result": "invalid_signature",
+        })
+
         raise HTTPException(status_code=401, detail="invalid signature")
 
-    payload = json.loads(raw_body)
+    payload = await request.json()
     message = WebhookMessage(**payload)
 
     result = insert_message(message)
+    latency_ms = int((time.time() - start_time) * 1000)
 
-    # 🔹 Webhook-specific structured log
     log_event({
         "ts": datetime.utcnow().isoformat() + "Z",
         "level": "INFO",
-        "request_id": "webhook",
+        "request_id": request_id,
         "method": "POST",
         "path": "/webhook",
         "status": 200,
-        "latency_ms": 0,
+        "latency_ms": latency_ms,
         "message_id": message.message_id,
         "dup": result == "duplicate",
         "result": result,
     })
 
     return {"status": "ok"}
-
 
 @app.get("/messages")
 def list_messages(
@@ -99,3 +115,20 @@ async def logging_middleware(request: Request, call_next):
 
     return response
 
+@app.get("/health/live")
+def health_live():
+    # App is running
+    return {"status": "alive"}
+
+
+@app.get("/health/ready")
+def health_ready():
+    # Check DB connectivity
+    if not check_db():
+        raise HTTPException(status_code=503, detail="database not ready")
+
+    # Check webhook secret
+    if not settings.WEBHOOK_SECRET:
+        raise HTTPException(status_code=503, detail="webhook secret not set")
+
+    return {"status": "ready"}
